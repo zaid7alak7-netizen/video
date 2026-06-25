@@ -1,0 +1,68 @@
+name: Generate Videos
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_zip:
+        description: 'اسم ملف ZIP في آخر Release (مثال: pdf01.zip)'
+        required: true
+        default: 'pdf01.zip'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install numpy Pillow opencv-python-headless pydub requests
+          ffmpeg -version | head -1
+
+      - name: Download and extract project
+        run: |
+          gh release download --pattern "${{ github.event.inputs.project_zip }}" --dir .
+          unzip "${{ github.event.inputs.project_zip }}"
+
+          FOLDER_NAME="${{ github.event.inputs.project_zip }}"
+          FOLDER_NAME="${FOLDER_NAME%.zip}"
+
+          if [ ! -d "$FOLDER_NAME" ]; then
+            mkdir -p "$FOLDER_NAME"
+            for item in input assets *.py *.txt *.ipynb; do
+              [ -e "$item" ] && mv "$item" "$FOLDER_NAME/"
+            done
+          fi
+
+          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
+          echo "📂 محتويات المجلد:"
+          ls "$FOLDER_NAME"/
+          echo "📋 ملفات JSON:"
+          ls "$FOLDER_NAME"/input/json/ | wc -l
+          echo "🔊 ملفات Audio:"
+          ls "$FOLDER_NAME"/input/audio/ | wc -l
+          echo "💾 حجم المشروع:"
+          du -sh "$FOLDER_NAME"/
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Generate WebM videos
+        run: |
+          cd ${{ env.FOLDER_NAME }}
+          export VIDEO_TEMP_DIR=/tmp/video_temp
+          mkdir -p /tmp/video_temp output
+          python batch_generate.py --skip_existing --crf 56 --fps 20 --parts 3
+
+      - name: Upload output
+        uses: actions/upload-artifact@v4
+        with:
+          name: output-${{ env.FOLDER_NAME }}
+          path: ${{ env.FOLDER_NAME }}/output/
+          retention-days: 5
