@@ -10,6 +10,10 @@ on:
         description: 'اسم المشروع (مثال: pdf01) — يُستخدم كاسم للمجلد والـ artifact'
         required: true
         default: 'pdf01'
+      output_zip_name:
+        description: 'اسم ملف المخرجات المضغوط (بدون .zip) — مثال: my_videos'
+        required: true
+        default: 'output'
 
 jobs:
   generate:
@@ -79,9 +83,14 @@ jobs:
           mkdir -p /tmp/video_temp output
           python batch_generate.py --skip_existing --crf 56 --fps 20 --parts 3
 
+      - name: Zip output
+        run: |
+          cd ${{ env.FOLDER_NAME }}/output
+          zip -r "$GITHUB_WORKSPACE/${{ github.event.inputs.output_zip_name }}.zip" .
+
       - name: Upload output
         uses: actions/upload-artifact@v4
         with:
-          name: output-${{ github.event.inputs.project_name }}
-          path: ${{ env.FOLDER_NAME }}/output/
+          name: ${{ github.event.inputs.output_zip_name }}
+          path: ${{ github.event.inputs.output_zip_name }}.zip
           retention-days: 5
