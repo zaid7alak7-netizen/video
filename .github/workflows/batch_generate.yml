@@ -1,0 +1,136 @@
+name: Batch Generate Videos (تشغيل متعدد)
+
+on:
+  workflow_dispatch:
+    inputs:
+      drive_urls:
+        description: 'روابط ملفات ZIP مفصولة بفاصلة (مثال: https://drive.google.com/file/d/ID1/view, https://drive.google.com/file/d/ID2/view)'
+        required: true
+      output_prefix:
+        description: 'بادئة اسم المخرجات (مثال: output_5-1_) → output_5-1_01, output_5-1_02...'
+        required: true
+        default: 'output_'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+    steps:
+      - name: Build matrix from URLs
+        id: build_matrix
+        env:
+          DRIVE_URLS: ${{ inputs.drive_urls }}
+          OUTPUT_PREFIX: ${{ inputs.output_prefix }}
+        run: |
+          python3 << 'PYEOF'
+          import os, json, re
+
+          urls_raw = os.environ["DRIVE_URLS"]
+          prefix = os.environ["OUTPUT_PREFIX"]
+
+          # فصل الروابط بفاصلة أو سطر جديد
+          urls = [u.strip() for u in re.split(r'[,\n]+', urls_raw) if u.strip()]
+
+          if not urls:
+              raise SystemExit("❌ لا توجد روابط")
+
+          files = []
+          for i, url in enumerate(urls, 1):
+              output_name = f"{prefix}{i:02d}"
+              project_name = f"pdf{i:02d}"
+              files.append({
+                  "drive_url": url,
+                  "output_name": output_name,
+                  "project_name": project_name
+              })
+
+          matrix = {"include": files}
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+
+          print(f"✅ تم تجهيز {len(files)} عملية:")
+          for item in files:
+              print(f"   • {item['output_name']} ← {item['drive_url'][:60]}...")
+          PYEOF
+
+  generate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install numpy Pillow opencv-python-headless pydub requests "gdown>=4.7.3"
+          ffmpeg -version | head -1
+
+      - name: Download and extract project
+        env:
+          DRIVE_URL: ${{ matrix.drive_url }}
+        run: |
+          ZIP_NAME="${{ matrix.project_name }}.zip"
+          FOLDER_NAME="${{ matrix.project_name }}"
+
+          echo "⬇️ تنزيل ${{ matrix.output_name }} من Google Drive..."
+          FILE_ID=$(python3 -c "
+          import re, os, sys
+          url = os.environ['DRIVE_URL']
+          m = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+          if not m:
+              m = re.search(r'id=([a-zA-Z0-9_-]+)', url)
+          if m: print(m.group(1))
+          else: sys.exit('Could not extract file ID')
+          ")
+          echo "📎 FILE_ID: $FILE_ID"
+          gdown "$FILE_ID" -O "$ZIP_NAME"
+
+          echo "📦 فك الضغط..."
+          unzip "$ZIP_NAME"
+
+          if [ ! -d "$FOLDER_NAME" ]; then
+            mkdir -p "$FOLDER_NAME"
+            for item in input assets *.py *.txt *.ipynb; do
+              [ -e "$item" ] && mv "$item" "$FOLDER_NAME/"
+            done
+          fi
+
+          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
+          echo "📂 محتويات المجلد:"
+          ls "$FOLDER_NAME"/
+          echo "📋 ملفات JSON:"
+          ls "$FOLDER_NAME"/input/json/ | wc -l
+          echo "🔊 ملفات Audio:"
+          ls "$FOLDER_NAME"/input/audio/ | wc -l
+          echo "💾 حجم المشروع:"
+          du -sh "$FOLDER_NAME/"
+
+      - name: Generate WebM videos
+        run: |
+          cd ${{ env.FOLDER_NAME }}
+          export VIDEO_TEMP_DIR=/tmp/video_temp
+          mkdir -p /tmp/video_temp output
+          python batch_generate.py --skip_existing --crf 56 --fps 20 --parts 3
+
+      - name: Zip output
+        run: |
+          cd ${{ env.FOLDER_NAME }}/output
+          zip -r "$GITHUB_WORKSPACE/${{ matrix.output_name }}.zip" .
+
+      - name: Upload output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output_name }}
+          path: ${{ matrix.output_name }}.zip
+          retention-days: 5
